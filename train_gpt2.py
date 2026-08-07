@@ -112,7 +112,7 @@ class GPT(nn.Module):
         if isinstance(module, nn.Linear):
             std = 0.02
             if hasattr(module, 'NANOGPT_SCALE_INIT'):
-                std *= (2 * self.config.n_layer) ** -0.05
+                std *= (2 * self.config.n_layer) ** -0.5
             torch.nn.init.normal_(module.weight, mean=0.0, std=std)
             if module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
@@ -122,7 +122,7 @@ class GPT(nn.Module):
     def forward(self, idx, targets=None):
         # idx is of shape (B, T)
         B, T = idx.size()
-        assert T <= self.config.block_size, f"Cannot forward sequence of length {T}, block size is only {self.block_size}"
+        assert T <= self.config.block_size, f"Cannot forward sequence of length {T}, block size is only {self.config.block_size}"
         # forward the token and position embeddings
         pos = torch.arange(0, T, dtype=torch.long, device=idx.device) # shape (T)
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (T, n_embd)
@@ -235,7 +235,8 @@ if torch.cuda.is_available():
 
 #train_loader = DataLoaderLite(B=4, T=32)
 #train_loader = DataLoaderLite(B=16, T=1024)
-train_loader = DataLoaderLite(B=4, T=1024)
+#train_loader = DataLoaderLite(B=16, T=1024)
+train_loader = DataLoaderLite(B=8, T=1024)
 
 torch.set_float32_matmul_precision('high')
 
@@ -251,17 +252,16 @@ for i in range(50):
     x, y = train_loader.next_batch()
     x, y = x.to(device), y.to(device)
     optimizer.zero_grad()
-    #with torch.autocast(device_type=device, dtype=torch.bfloat16):
-    with torch.autocast(device_type=device, dtype=torch.float16):
+    with torch.autocast(device_type=device, dtype=torch.bfloat16):
         logits, loss = model(x, y)
-    logits, loss = model(x, y)
     loss.backward()
     optimizer.step()
     torch.cuda.synchronize()
     t1 = time.time()
-    dt = (t1 - t0)*1000 # time difference in miliseconds
-    tokens_per_sec = (train_loader.B * train_loader.T) / (t1 - t0)
-    print(f"step {i}, loss: {loss.item()}, dt: {dt:.2f}ms, tok/sec: {tokens_per_sec}")
+    dt = t1 - t0 # time difference in miliseconds
+    tokens_processed = train_loader.B * train_loader.T
+    tokens_per_sec = tokens_processed / dt
+    print(f"step {i:4d} | loss: {loss.item():.6f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec}")
 
 
 import sys; sys.exit(0)
