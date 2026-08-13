@@ -332,11 +332,13 @@ torch.manual_seed(1337)
 if torch.cuda.is_available():
     torch.cuda.manual_seed(1337)
 
+enc = tiktoken.get_encoding("gpt2")
+
 #train_loader = DataLoaderLite(B=4, T=32)
 #train_loader = DataLoaderLite(B=16, T=1024)
 #train_loader = DataLoaderLite(B=16, T=1024)
 total_batch_size = 524288 # 2**19, ~0.5M, in  number of tokens
-B = 64 # micro batch size 64
+B = 32 # micro batch size 64
 T = 1024 # sequence length
 assert total_batch_size % (B * T * ddp_world_size) == 0, "make sure total_batch_size is divisible by B * T * ddp_world_size"
 grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
@@ -363,6 +365,8 @@ max_lr = 6e-4
 min_lr = max_lr * 0.1
 warmup_steps = 715
 max_steps = 19073 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
+checkpoint_interval = 1000
+resume_from = None  # e.g. "log/model_05000.pt" to resume training
 def get_lr(it):
     # 1) linear warmup for warmup_iters steps
     if it < warmup_steps:
@@ -379,14 +383,55 @@ def get_lr(it):
 # optimize!
 #optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
 optimizer = raw_model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device=device)
+
 # create the log directory we will write checkpoints to and log to
 log_dir = "log"
 os.makedirs(log_dir, exist_ok=True)
-log_file = os.path.join(log_dir, f"log.txt")
-with open(log_file, "w") as f: # open for writing to clear the file
-    pass
+log_file = os.path.join(log_dir, "log.txt")
 
-for step in range(max_steps):
+start_step = 0
+
+# resume training from a checkpoint if requested
+if resume_from is not None:
+    checkpoint = torch.load(resume_from, map_location=device)
+
+    raw_model.load_state_dict(checkpoint["model"])
+
+    if "optimizer" in checkpoint:
+        optimizer.load_state_dict(checkpoint["optimizer"])
+        # optimizer tensors can be restored on CPU depending on PyTorch/checkpoint;
+        # move them to the current device.
+        for state in optimizer.state.values():
+            for key, value in state.items():
+                if torch.is_tensor(value):
+                    state[key] = value.to(device)
+
+    start_step = checkpoint["step"] + 1
+
+    # restore RNG states when available
+    if "torch_rng_state" in checkpoint:
+        torch.set_rng_state(checkpoint["torch_rng_state"])
+    if device_type == "cuda" and "cuda_rng_state" in checkpoint:
+        torch.cuda.set_rng_state(checkpoint["cuda_rng_state"], device=device)
+
+    # restore loader position when available
+    if "train_loader_current_shard" in checkpoint:
+        train_loader.current_shard = checkpoint["train_loader_current_shard"]
+        train_loader.tokens = load_tokens(train_loader.shards[train_loader.current_shard])
+        train_loader.current_position = checkpoint["train_loader_current_position"]
+
+    if master_process:
+        print(f"resuming training from {resume_from} at step {start_step}")
+
+# only clear the log on a fresh run
+if master_process and resume_from is None:
+    with open(log_file, "w") as f:
+        pass
+
+if ddp:
+    dist.barrier()
+
+for step in range(start_step, max_steps):
     t0 = time.time()
     last_step = (step == max_steps - 1)
 
@@ -410,18 +455,23 @@ for step in range(max_steps):
             print(f"validation loss: {val_loss_accum.item():.4f}")
             with open(log_file, "a") as f:
                 f.write(f"{step} val {val_loss_accum.item():.4f}\n")
-            if step > 0 and (step % 5000 == 0 or last_step):
-                # optionally write model checkpoints
+            if step > 0 and (step % checkpoint_interval == 0 or last_step):
                 checkpoint_path = os.path.join(log_dir, f"model_{step:05d}.pt")
                 checkpoint = {
-                    'model': raw_model.state_dict(),
-                    'config': raw_model.config,
-                    'step': step,
-                    'val_loss': val_loss_accum.item()
+                    "model": raw_model.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "config": raw_model.config,
+                    "step": step,
+                    "val_loss": val_loss_accum.item(),
+                    "train_loader_current_shard": train_loader.current_shard,
+                    "train_loader_current_position": train_loader.current_position,
+                    "torch_rng_state": torch.get_rng_state(),
                 }
-                # you might also want to add optimizer.state_dict() and
-                # rng seeds etc., if you wanted to more exactly resume training
+                if device_type == "cuda":
+                    checkpoint["cuda_rng_state"] = torch.cuda.get_rng_state(device=device)
+
                 torch.save(checkpoint, checkpoint_path)
+                print(f"checkpoint saved to {checkpoint_path}")
 
     # once in a while evaluate hellaswag
     if (step % 250 == 0 or last_step) and (not use_compile):

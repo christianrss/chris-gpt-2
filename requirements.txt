@@ -4,3 +4,5 @@ transformers
 tiktoken
 tqdm
 datasets
+safetensors
+tokenizers
