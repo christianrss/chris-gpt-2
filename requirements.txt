@@ -2,5 +2,7 @@ torch
 numpy
 transformers
 tiktoken
-tdqm
+tqdm
 datasets
+safetensors
+tokenizers

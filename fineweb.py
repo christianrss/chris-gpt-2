@@ -12,7 +12,7 @@ import multiprocessing as mp
 import numpy as np
 import tiktoken
 from datasets import load_dataset # pip install datasets
-from tdqm import tdqm # pip install tdqm
+from tqdm import tqdm # pip install tqdm
 
 # ----------------------------------
 local_dir= "edu_fineweb10B"
@@ -24,7 +24,7 @@ DATA_CACHE_DIR = os.path.join(os.path.dirname(__file__), local_dir)
 os.makedirs(DATA_CACHE_DIR, exist_ok=True)
 
 # download the dataset
-fw = load_dataset("HuggingFaceW/fineweb-edu", name=remote_name, split="train")
+fw = load_dataset("HuggingFaceFW/fineweb-edu", name=remote_name, split="train")
 
 # init the tokenizer
 enc = tiktoken.get_encoding("gpt2")
@@ -57,7 +57,7 @@ with mp.Pool(nprocs) as pool:
             token_count += len(tokens)
             # update progress bar
             if progress_bar is None:
-                progress_bar = tdqm(total=shard_size, unit="tokens", desc=f"Shard {shard_Index}")
+                progress_bar = tqdm(total=shard_size, unit="tokens", desc=f"Shard {shard_index}")
             progress_bar.update(len(tokens))
         else:
             # write the current shard and start a new one
